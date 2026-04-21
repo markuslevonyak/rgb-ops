@@ -1099,7 +1099,7 @@ impl<S: StashProvider, H: StateProvider, P: IndexProvider> Stock<S, H, P> {
         &mut self,
         contract: ValidContract,
         resolver: R,
-    ) -> Result<validation::Status, StockError<S, H, P>> {
+    ) -> Result<(), StockError<S, H, P>> {
         self.consume_consignment(contract, resolver)
     }
 
@@ -1107,7 +1107,7 @@ impl<S: StashProvider, H: StateProvider, P: IndexProvider> Stock<S, H, P> {
         &mut self,
         contract: ValidTransfer,
         resolver: R,
-    ) -> Result<validation::Status, StockError<S, H, P>> {
+    ) -> Result<(), StockError<S, H, P>> {
         self.consume_consignment(contract, resolver)
     }
 
@@ -1115,10 +1115,8 @@ impl<S: StashProvider, H: StateProvider, P: IndexProvider> Stock<S, H, P> {
         &mut self,
         consignment: ValidConsignment<TRANSFER>,
         resolver: R,
-    ) -> Result<validation::Status, StockError<S, H, P>> {
-        let (mut consignment, status) = consignment.split();
-
-        consignment = self.stash.resolve_secrets(consignment)?;
+    ) -> Result<(), StockError<S, H, P>> {
+        let consignment = self.stash.resolve_secrets(consignment.into_consignment())?;
         self.store_transaction(move |stash, state, index| {
             state.update_from_consignment(&consignment, &resolver)?;
             index.index_consignment(&consignment)?;
@@ -1126,7 +1124,7 @@ impl<S: StashProvider, H: StateProvider, P: IndexProvider> Stock<S, H, P> {
             Ok(())
         })?;
 
-        Ok(status)
+        Ok(())
     }
 
     /// Imports fascia into the stash, index and inventory.
