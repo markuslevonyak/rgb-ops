@@ -975,6 +975,7 @@ dependencies = [
  "rgb-strict-encoding",
  "rgb-strict-types",
  "serde",
+ "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]

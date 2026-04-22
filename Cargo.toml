@@ -71,6 +71,7 @@ chrono = "0.4.38"
 indexmap = { workspace = true }
 serde_crate = { workspace = true, optional = true }
 rand = "0.9.1"
+serde_json = { version = "1", optional = true }
 
 [features]
 default = []
@@ -94,6 +95,7 @@ mempool_blocking = [
 ]
 serde = [
     "serde_crate",
+    "serde_json",
     "chrono/serde",
     "amplify/serde",
     "rgb-strict-encoding/serde",

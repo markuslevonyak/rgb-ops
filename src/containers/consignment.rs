@@ -137,6 +137,17 @@ pub struct ValidConsignment<const TRANSFER: bool> {
 }
 
 impl<const TRANSFER: bool> ValidConsignment<TRANSFER> {
+    #[cfg(all(feature = "fs", feature = "serde"))]
+    pub(crate) fn from_parts(
+        consignment: Consignment<TRANSFER>,
+        validation_status: validation::Status,
+    ) -> Self {
+        Self {
+            validation_status,
+            consignment,
+        }
+    }
+
     pub fn validation_status(&self) -> &validation::Status { &self.validation_status }
 
     pub fn into_consignment(self) -> Consignment<TRANSFER> { self.consignment }

@@ -24,8 +24,12 @@ use std::io::{self, Read, Write};
 
 use amplify::confinement::U32 as FILE_MAX_LEN;
 use armor::{AsciiArmor, StrictArmor};
+#[cfg(all(feature = "fs", feature = "serde"))]
+use strict_encoding::StrictReader;
 use strict_encoding::{StreamReader, StreamWriter, StrictDecode, StrictEncode};
 
+#[cfg(all(feature = "fs", feature = "serde"))]
+use crate::containers::{Consignment, ValidConsignment};
 use crate::containers::{Contract, Kit, Transfer};
 
 const RGB_PREFIX: [u8; 4] = *b"RGB\x00";
@@ -45,6 +49,11 @@ pub enum LoadError {
     #[display(inner)]
     #[from]
     Armor(armor::StrictArmorError),
+
+    #[cfg(all(feature = "fs", feature = "serde"))]
+    #[display(inner)]
+    #[from]
+    Json(serde_json::Error),
 }
 
 pub trait FileContent: StrictArmor {
@@ -111,6 +120,44 @@ impl FileContent for Contract {
 
 impl FileContent for Transfer {
     const MAGIC: [u8; MAGIC_LEN] = *b"TFR";
+}
+
+#[cfg(all(feature = "fs", feature = "serde"))]
+impl<const TRANSFER: bool> ValidConsignment<TRANSFER> {
+    const VALID_MAGIC: [u8; MAGIC_LEN] = if TRANSFER { *b"VTF" } else { *b"VCO" };
+
+    pub fn save_file(&self, path: impl AsRef<std::path::Path>) -> Result<(), io::Error> {
+        let mut file = std::fs::File::create(path)?;
+        file.write_all(&RGB_PREFIX)?;
+        file.write_all(&Self::VALID_MAGIC)?;
+
+        let writer = StreamWriter::new::<FILE_MAX_LEN>(&mut file);
+        StrictEncode::strict_write(&**self, writer)?;
+
+        serde_json::to_writer(&mut file, self.validation_status()).map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    pub fn load_file(path: impl AsRef<std::path::Path>) -> Result<Self, LoadError> {
+        let mut file = std::fs::File::open(path)?;
+        let mut rgb = [0u8; 4];
+        let mut magic = [0u8; MAGIC_LEN];
+        file.read_exact(&mut rgb)?;
+        file.read_exact(&mut magic)?;
+        if rgb != RGB_PREFIX || magic != Self::VALID_MAGIC {
+            return Err(LoadError::InvalidMagic);
+        }
+
+        let consignment = {
+            let stream = StreamReader::new::<FILE_MAX_LEN>(&mut file);
+            let mut reader = StrictReader::with(stream);
+            Consignment::<TRANSFER>::strict_decode(&mut reader)?
+        };
+
+        let validation_status = serde_json::from_reader(&mut file)?;
+
+        Ok(Self::from_parts(consignment, validation_status))
+    }
 }
 
 #[derive(Clone, Debug, From)]
@@ -194,7 +241,11 @@ mod test {
     use std::fs::OpenOptions;
     use std::str::FromStr;
 
+    use rgb::validation;
+
     use super::*;
+    use crate::containers::ValidTransfer;
+
     static DEFAULT_KIT_PATH: &str = "asset/kit.default";
     #[cfg(feature = "fs")]
     static ARMORED_KIT_PATH: &str = "asset/armored_kit.default";
@@ -206,6 +257,8 @@ mod test {
     static DEFAULT_TRANSFER_PATH: &str = "asset/transfer.default";
     #[cfg(feature = "fs")]
     static ARMORED_TRANSFER_PATH: &str = "asset/armored_transfer.default";
+
+    static DEFAULT_VALID_TRANSFER_PATH: &str = "asset/valid_transfer.default";
 
     #[test]
     fn kit_save_load_round_trip() {
@@ -387,6 +440,34 @@ mod test {
         let transfer =
             Transfer::load_file(DEFAULT_TRANSFER_PATH).expect("fail to load transfer.default");
         assert_eq!(&transfer, &default_transfer, "transfer roudtrip does not work");
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn valid_transfer_save_load_round_trip() {
+        let valid_transfer = ValidTransfer::load_file(DEFAULT_VALID_TRANSFER_PATH)
+            .expect("fail to load valid transfer.default");
+
+        let default_transfer = almost_default_transfer();
+        let default_valid_transfer =
+            ValidTransfer::from_parts(default_transfer, validation::Status::default());
+        assert_eq!(
+            valid_transfer.into_consignment(),
+            default_valid_transfer.clone().into_consignment(),
+            "valid transfer default is not same as before"
+        );
+
+        default_valid_transfer
+            .save_file(DEFAULT_VALID_TRANSFER_PATH)
+            .expect("fail to export transfer");
+
+        let valid_transfer = ValidTransfer::load_file(DEFAULT_VALID_TRANSFER_PATH)
+            .expect("fail to load valid transfer.default");
+        assert_eq!(
+            valid_transfer.into_consignment(),
+            default_valid_transfer.into_consignment(),
+            "valid transfer roudtrip does not work"
+        );
     }
 
     #[cfg(feature = "fs")]
