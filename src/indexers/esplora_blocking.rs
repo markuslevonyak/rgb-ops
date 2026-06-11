@@ -60,10 +60,7 @@ impl ResolveWitness for EsploraClient {
             .inner
             .get_tx_status(&txid)
             .map_err(|e| WitnessResolverError::ResolverIssue(Some(txid), e.to_string()))?;
-        let ord = match status
-            .block_height
-            .and_then(|h| status.block_time.map(|t| (h, t)))
-        {
+        let ord = match status.block_height.zip(status.block_time) {
             Some((h, t)) => {
                 let height = NonZeroU32::new(h).ok_or(WitnessResolverError::InvalidResolverData)?;
                 WitnessOrd::Mined(
