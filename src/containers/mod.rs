@@ -33,7 +33,8 @@ mod kit;
 
 pub use anchors::{PubWitness, SealWitness, SealWitnessMergeError, ToWitnessId, WitnessBundle};
 pub use consignment::{
-    Consignment, ConsignmentExt, ConsignmentId, ConsignmentParseError, Contract, Transfer,
+    Consignment, ConsignmentConstraintError, ConsignmentExt, ConsignmentId, ConsignmentParseError,
+    Contract, Transfer, UncheckedConsignment, UncheckedContract, UncheckedTransfer,
     ValidConsignment, ValidContract, ValidTransfer,
 };
 pub use file::{FileContent, LoadError, UniversalFile};

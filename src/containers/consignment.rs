@@ -23,6 +23,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::ops::Deref;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::str::FromStr;
 
 use aluvm::library::Lib;
@@ -41,7 +42,9 @@ use rgb::{
     SchemaId, TransitionBundle, Txid,
 };
 use rgbcore::validation::ConsignmentApi;
-use strict_encoding::{StrictDeserialize, StrictDumb, StrictSerialize};
+use strict_encoding::{
+    DeserializeError, SerializeError, StrictDeserialize, StrictDumb, StrictSerialize,
+};
 use strict_types::TypeSystem;
 
 use super::{
@@ -226,9 +229,11 @@ impl<const TRANSFER: bool> Deref for ValidConsignment<TRANSFER> {
 #[display(AsciiArmor::to_ascii_armored_string)]
 #[derive(StrictType, StrictDumb, StrictEncode, StrictDecode)]
 #[strict_type(lib = LIB_NAME_RGB_OPS)]
+// NB: only Serialize is derived, not Deserialize since it would bypass the
+// structural bounds defined by the Confined trait
 #[cfg_attr(
     feature = "serde",
-    derive(Serialize, Deserialize),
+    derive(Serialize),
     serde(crate = "serde_crate", rename_all = "camelCase")
 )]
 pub struct Consignment<const TRANSFER: bool> {
@@ -484,6 +489,106 @@ impl<const TRANSFER: bool> FromStr for Consignment<TRANSFER> {
         }
 
         Ok(consignment)
+    }
+}
+
+pub type UncheckedContract = UncheckedConsignment<false>;
+pub type UncheckedTransfer = UncheckedConsignment<true>;
+
+/// Error returned when a consignment fails the structural strict-encoding
+/// constraint check performed by [`UncheckedConsignment::into_checked`].
+#[derive(Debug, Display, Error, From)]
+#[display(doc_comments)]
+pub enum ConsignmentConstraintError {
+    /// consignment violates a strict-encoding constraint: {0}
+    #[from]
+    Serialize(SerializeError),
+
+    /// consignment violates a strict-encoding constraint: {0}
+    #[from]
+    Deserialize(DeserializeError),
+
+    /// consignment contains a value that violates a low-level type invariant.
+    TypeInvariant,
+}
+
+/// A consignment parsed from an unvalidated representation whose structural
+/// strict-encoding constraints have **not** yet been enforced.
+///
+/// Note this concerns *structural* constraints only. It is unrelated to the
+/// full client-side validation performed by [`Consignment::validate`].
+#[derive(Clone, Debug)]
+pub struct UncheckedConsignment<const TRANSFER: bool>(Consignment<TRANSFER>);
+
+impl<const TRANSFER: bool> UncheckedConsignment<TRANSFER> {
+    /// Enforces the structural strict-encoding constraints and returns a
+    /// [`Consignment`] guaranteed to satisfy every declared type-level
+    /// invariant, or an error if any is violated.
+    pub fn into_checked(self) -> Result<Consignment<TRANSFER>, ConsignmentConstraintError> {
+        let consignment = self.0;
+        // Round-trip through the strict codec. Encoding never rejects an
+        // over-bound collection (it just writes its length), but decoding
+        // re-imposes every declared bound, so an invariant-violating value is
+        // rejected here instead of surviving.
+        //
+        // Encoding a value that violates a *bit-packed* small-integer invariant
+        // (`u1`..`u7`) would panic inside the amplify codec, so we trap any
+        // panic so a crafted input can never turn into a process abort.
+        let encoded =
+            catch_unwind(AssertUnwindSafe(|| consignment.to_strict_serialized::<{ usize::MAX }>()))
+                .map_err(|_| ConsignmentConstraintError::TypeInvariant)?;
+        let bytes = encoded?;
+        let checked = Consignment::<TRANSFER>::from_strict_serialized::<{ usize::MAX }>(bytes)?;
+        Ok(checked)
+    }
+}
+
+impl<const TRANSFER: bool> From<Consignment<TRANSFER>> for UncheckedConsignment<TRANSFER> {
+    fn from(consignment: Consignment<TRANSFER>) -> Self { Self(consignment) }
+}
+
+impl<const TRANSFER: bool> TryFrom<UncheckedConsignment<TRANSFER>> for Consignment<TRANSFER> {
+    type Error = ConsignmentConstraintError;
+
+    fn try_from(unchecked: UncheckedConsignment<TRANSFER>) -> Result<Self, Self::Error> {
+        unchecked.into_checked()
+    }
+}
+
+// serde ingestion for UncheckedConsignment. Consignment itself has no
+// Deserialize, so the field-wise parsing is done by a shadow struct mirroring
+// its layout. serde's remote attribute (which would avoid re-listing the
+// construction) does not support the const-generic Consignment<TRANSFER> path,
+// so we deserialize a non-generic shadow and re-wrap it into a Consignment of
+// the requested kind.
+#[cfg(feature = "serde")]
+#[derive(Deserialize)]
+#[serde(crate = "serde_crate", rename_all = "camelCase")]
+struct ConsignmentShadow {
+    version: ContainerVer,
+    transfer: bool,
+    terminals: SmallOrdMap<BundleId, SecretSeals>,
+    genesis: Genesis,
+    bundles: LargeVec<WitnessBundle>,
+    schema: Schema,
+    types: TypeSystem,
+    scripts: Confined<BTreeSet<Lib>, 0, CONSIGNMENT_MAX_LIBS>,
+}
+
+#[cfg(feature = "serde")]
+impl<'de, const TRANSFER: bool> serde_crate::Deserialize<'de> for UncheckedConsignment<TRANSFER> {
+    fn deserialize<D: serde_crate::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let shadow = ConsignmentShadow::deserialize(deserializer)?;
+        Ok(UncheckedConsignment(Consignment {
+            version: shadow.version,
+            transfer: shadow.transfer,
+            terminals: shadow.terminals,
+            genesis: shadow.genesis,
+            bundles: shadow.bundles,
+            schema: shadow.schema,
+            types: shadow.types,
+            scripts: shadow.scripts,
+        }))
     }
 }
 

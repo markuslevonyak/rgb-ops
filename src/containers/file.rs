@@ -160,10 +160,12 @@ impl<const TRANSFER: bool> ValidConsignment<TRANSFER> {
     }
 }
 
+// NB: only Serialize is derived, not Deserialize since it would bypass the
+// structural bounds defined by the Confined trait.
 #[derive(Clone, Debug, From)]
 #[cfg_attr(
     feature = "serde",
-    derive(Serialize, Deserialize),
+    derive(Serialize),
     serde(crate = "serde_crate", rename_all = "camelCase", tag = "type")
 )]
 pub enum UniversalFile {
