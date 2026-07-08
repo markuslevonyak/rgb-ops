@@ -19,8 +19,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use rand::{rng, RngCore};
 use rgb::seals::txout::{BlindSeal, CloseMethod, SealTxid};
-use rgb::secp256k1::rand::{thread_rng, RngCore};
 use rgb::{GraphSeal, SecretSeal, TxoSeal, Vout};
 
 use crate::LIB_NAME_RGB_OPS;
@@ -55,7 +55,7 @@ impl VoutSeal {
     /// closing method. Uses `thread_rng` to initialize blinding factor.
     #[inline]
     pub fn new(method: CloseMethod, vout: impl Into<Vout>) -> Self {
-        VoutSeal::with(method, vout, thread_rng().next_u64())
+        VoutSeal::with(method, vout, rng().next_u64())
     }
 
     /// Creates new opret-seal seal definition for the provided output number

@@ -24,9 +24,8 @@ rgb-strict-types = { workspace = true }
 rgb-consensus = { workspace = true }
 indexmap = { workspace = true }
 fluent-uri = "0.3.2"
-percent-encoding = "2.3.1"
+percent-encoding = "2.3.2"
 serde_crate = { workspace = true, optional = true }
-rand = "0.9.1"
 
 [features]
 default = []
