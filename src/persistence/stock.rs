@@ -1209,90 +1209,121 @@ impl<S: StashProvider, H: StateProvider, P: IndexProvider> Stock<S, H, P> {
         Ok(self.stash.store_secret_seal(seal)?)
     }
 
-    fn set_bundles_as_invalid(&mut self, bundle_id: &BundleId) -> Result<(), StockError<S, H, P>> {
-        // add bundle to set of invalid bundles
-        self.state.update_bundle(*bundle_id, false)?;
-        let bundle = self.stash.bundle(*bundle_id)?.clone();
-        // recursively set all bundle descendants as invalid
-        for opid in bundle.known_transitions_opids() {
-            let children_bundle_ids = match self.index.bundle_ids_children_of_op(opid) {
-                Ok(bundle_ids) => bundle_ids,
-                Err(IndexError::Inconsistency(IndexInconsistency::BundleAbsent(_))) => {
-                    // this transition has no children yet
-                    return Ok(());
-                }
-                Err(e) => return Err(e.into()),
-            };
-
-            for child_bundle_id in children_bundle_ids {
-                self.set_bundles_as_invalid(&child_bundle_id)?;
+    fn op_children(&self, opid: OpId) -> Result<Vec<(OpId, BundleId)>, StockError<S, H, P>> {
+        // collect all bundle ids of the children of the operation
+        let children_bundle_ids = match self.index.bundle_ids_children_of_op(opid) {
+            Ok(bundle_ids) => bundle_ids,
+            Err(IndexError::Inconsistency(IndexInconsistency::BundleAbsent(_))) => {
+                // this transition has no children yet
+                small_bset![]
             }
+            Err(e) => return Err(e.into()),
+        };
+        // collect all opids of transitions consuming outputs of the operation,
+        // together with their bundle ids
+        let mut children = vec![];
+        for child_bundle_id in children_bundle_ids {
+            let child_bundle = self.stash.bundle(child_bundle_id)?;
+            for kt in &child_bundle.known_transitions {
+                if kt.transition.inputs.iter().any(|input| input.op == opid) {
+                    children.push((kt.opid, child_bundle_id));
+                }
+            }
+        }
+        Ok(children)
+    }
+
+    fn set_ops_as_invalid(
+        &mut self,
+        opid: OpId,
+        visited: &mut BTreeSet<OpId>,
+    ) -> Result<(), StockError<S, H, P>> {
+        // descendant trees of different operations can overlap and converge;
+        // visit each operation only once per update
+        // the visited set is local to the update on purpose: operations
+        // already invalid from previous updates must still be re-visited,
+        // since new descendants may have been added in the meantime
+        if !visited.insert(opid) {
+            return Ok(());
+        }
+        // add operation to set of invalid operations
+        self.state.update_op(opid, false)?;
+        // recursively set all descendant operations as invalid
+        for (child_opid, _) in self.op_children(opid)? {
+            self.set_ops_as_invalid(child_opid, visited)?;
         }
         Ok(())
     }
 
-    fn maybe_update_bundles_as_valid(
+    fn maybe_update_ops_as_valid(
         &mut self,
-        bundle_id: &BundleId,
-        invalid_bundles: &mut LargeOrdSet<BundleId>,
-        maybe_became_valid_bundle_ids: &mut BTreeSet<BundleId>,
+        opid: OpId,
+        bundle_id: BundleId,
+        invalid_ops: &mut LargeOrdSet<OpId>,
+        maybe_became_valid_opids: &mut BTreeSet<OpId>,
+        witnesses: &BTreeMap<Txid, WitnessOrd>,
     ) -> Result<bool, StockError<S, H, P>> {
-        let bundle = self.stash.bundle(*bundle_id)?.clone();
-        let mut valid = true;
-        // recursively visit bundle ancestors
-        for KnownTransition { transition, .. } in &bundle.known_transitions {
+        let bundle = self.stash.bundle(bundle_id)?;
+        let transition = bundle
+            .get_transition(opid)
+            .ok_or(StashInconsistency::OperationAbsent(opid))?
+            .clone();
+
+        // a valid operation needs a valid witness for its bundle
+        let bundle_witness_ids = self.index.bundle_info(bundle_id)?.0;
+        let mut valid = bundle_witness_ids
+            .into_iter()
+            .any(|id| witnesses.get(&id).is_some_and(|ord| ord.is_valid()));
+
+        // recursively visit operation ancestors
+        if valid {
             for input in &transition.inputs {
                 let input_opid = input.op;
-                let input_bundle_id = match self.index.bundle_id_for_op(input_opid) {
-                    Ok(id) => Some(id),
-                    Err(IndexError::Inconsistency(IndexInconsistency::BundleAbsent(_))) => {
-                        // reached genesis
-                        None
-                    }
-                    Err(e) => return Err(e.into()),
-                };
-
-                if let Some(input_bundle_id) = input_bundle_id {
-                    // process parent first if its status is also uncertain
-                    if maybe_became_valid_bundle_ids.contains(&input_bundle_id) {
-                        valid = self.maybe_update_bundles_as_valid(
-                            &input_bundle_id,
-                            invalid_bundles,
-                            maybe_became_valid_bundle_ids,
-                        )?;
-                    // a single invalid parent is enough to consider the bundle as invalid
-                    } else if invalid_bundles.contains(&input_bundle_id) {
+                // process parent first if its status is also uncertain
+                if maybe_became_valid_opids.contains(&input_opid) {
+                    let input_bundle_id = self.index.bundle_id_for_op(input_opid)?;
+                    if !self.maybe_update_ops_as_valid(
+                        input_opid,
+                        input_bundle_id,
+                        invalid_ops,
+                        maybe_became_valid_opids,
+                        witnesses,
+                    )? {
                         valid = false;
                         break;
                     }
+                // a single invalid parent is enough to consider the operation as invalid
+                } else if invalid_ops.contains(&input_opid) {
+                    valid = false;
+                    break;
                 }
             }
         }
 
-        // remove bundle since at this point we are sure about its status
-        maybe_became_valid_bundle_ids.remove(bundle_id);
+        // remove operation since at this point we are sure about its status
+        maybe_became_valid_opids.remove(&opid);
 
         if valid {
-            // remove bundle from set of invalid bundles
-            self.state.update_bundle(*bundle_id, true)?;
-            invalid_bundles.remove(bundle_id).unwrap();
-            // recursively visit bundle descendants to check if they became valid as well
-            for KnownTransition { opid, .. } in bundle.known_transitions {
-                let children_bundle_ids = match self.index.bundle_ids_children_of_op(opid) {
-                    Ok(bundle_ids) => bundle_ids,
-                    Err(IndexError::Inconsistency(IndexInconsistency::BundleAbsent(_))) => {
-                        // this transition has no children yet
-                        small_bset![]
-                    }
-                    Err(e) => return Err(e.into()),
-                };
-                for child_bundle_id in children_bundle_ids {
-                    self.maybe_update_bundles_as_valid(
-                        &child_bundle_id,
-                        invalid_bundles,
-                        maybe_became_valid_bundle_ids,
-                    )?;
+            // remove operation from set of invalid operations
+            self.state.update_op(opid, true)?;
+            invalid_ops.remove(&opid).unwrap();
+            // recursively visit operation descendants to check if they became valid as well
+            for (child_opid, child_bundle_id) in self.op_children(opid)? {
+                // a child may have already been settled as valid earlier in
+                // this update, when reached through another revalidated
+                // parent; don't re-walk its subtree
+                if !invalid_ops.contains(&child_opid)
+                    && !maybe_became_valid_opids.contains(&child_opid)
+                {
+                    continue;
                 }
+                self.maybe_update_ops_as_valid(
+                    child_opid,
+                    child_bundle_id,
+                    invalid_ops,
+                    maybe_became_valid_opids,
+                    witnesses,
+                )?;
             }
         }
 
@@ -1373,38 +1404,50 @@ impl<S: StashProvider, H: StateProvider, P: IndexProvider> Stock<S, H, P> {
             }
         }
 
-        // 2. set invalidity of bundles
+        // 2. set invalidity of operations
+        let mut visited = bset!();
         for bundle_ids in became_invalid_witnesses.values() {
             for bundle_id in bundle_ids {
                 let bundle_witness_ids: BTreeSet<Txid> =
                     self.index.bundle_info(*bundle_id)?.0.collect();
-                // set bundle as invalid only if there are no valid witnesses associated to it
+                // set the bundle operations as invalid only if there are no valid witnesses
+                // associated to the bundle
                 if bundle_witness_ids
                     .iter()
                     .all(|id| !witnesses.get(id).unwrap().is_valid())
                 {
-                    // set this bundle and all its descendants as invalid
-                    self.set_bundles_as_invalid(bundle_id)?;
+                    // set all the bundle operations and their descendants as invalid
+                    for opid in self.stash.bundle(*bundle_id)?.known_transitions_opids() {
+                        self.set_ops_as_invalid(opid, &mut visited)?;
+                    }
                 }
             }
         }
 
-        // 3. set validity of bundles
-        let mut maybe_became_valid_bundle_ids = bset!();
-        // get all bundles that became invalid and ones that were already invalid
-        let mut invalid_bundles_pre = self.as_state_provider().invalid_bundles();
+        // 3. set validity of operations
+        let mut maybe_became_valid_opids = bset!();
+        // get all operations that became invalid and ones that were already invalid
+        let mut invalid_ops_pre = self.as_state_provider().invalid_ops();
         for bundle_ids in became_valid_witnesses.values() {
-            // store bundles that may become valid (to be sure its ancestors are checked)
-            maybe_became_valid_bundle_ids.extend(bundle_ids);
+            for bundle_id in bundle_ids {
+                // store operations that may become valid (to be sure their ancestors are
+                // checked)
+                maybe_became_valid_opids
+                    .extend(self.stash.bundle(*bundle_id)?.known_transitions_opids());
+            }
         }
         for bundle_ids in became_valid_witnesses.values() {
             for bundle_id in bundle_ids {
-                // check if this bundle and its descendants are now valid
-                self.maybe_update_bundles_as_valid(
-                    bundle_id,
-                    &mut invalid_bundles_pre,
-                    &mut maybe_became_valid_bundle_ids,
-                )?;
+                // check if the bundle operations and their descendants are now valid
+                for opid in self.stash.bundle(*bundle_id)?.known_transitions_opids() {
+                    self.maybe_update_ops_as_valid(
+                        opid,
+                        *bundle_id,
+                        &mut invalid_ops_pre,
+                        &mut maybe_became_valid_opids,
+                        &witnesses,
+                    )?;
+                }
             }
         }
 

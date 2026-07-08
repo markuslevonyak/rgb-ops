@@ -28,8 +28,8 @@ use nonasync::persistence::{CloneNoPersistence, Persisting};
 use rgb::validation::{ResolveWitness, WitnessOrdProvider, WitnessResolverError};
 use rgb::vm::{ContractStateAccess, WitnessOrd};
 use rgb::{
-    BundleId, ContractId, Genesis, KnownTransition, RevealedData, RevealedValue, Schema, SchemaId,
-    Transition, TransitionBundle, Txid, VoidState,
+    BundleId, ContractId, Genesis, KnownTransition, OpId, RevealedData, RevealedValue, Schema,
+    SchemaId, Transition, TransitionBundle, Txid, VoidState,
 };
 
 use crate::containers::{ConsignmentExt, ToWitnessId};
@@ -201,9 +201,9 @@ impl<P: StateProvider> State<P> {
             .map_err(StateError::WriteProvider)
     }
 
-    pub fn update_bundle(&mut self, bundle_id: BundleId, valid: bool) -> Result<(), StateError<P>> {
+    pub fn update_op(&mut self, opid: OpId, valid: bool) -> Result<(), StateError<P>> {
         self.provider
-            .update_bundle(bundle_id, valid)
+            .update_op(opid, valid)
             .map_err(StateError::WriteProvider)
     }
 }
@@ -243,7 +243,7 @@ pub trait StateReadProvider {
 
     fn witnesses(&self) -> LargeOrdMap<Txid, WitnessOrd>;
 
-    fn invalid_bundles(&self) -> LargeOrdSet<BundleId>;
+    fn invalid_ops(&self) -> LargeOrdSet<OpId>;
 }
 
 pub trait StateWriteProvider: StoreTransaction<TransactionErr = Self::Error> {
@@ -268,7 +268,7 @@ pub trait StateWriteProvider: StoreTransaction<TransactionErr = Self::Error> {
         witness_ord: WitnessOrd,
     ) -> Result<(), Self::Error>;
 
-    fn update_bundle(&mut self, bundle_id: BundleId, valid: bool) -> Result<(), Self::Error>;
+    fn update_op(&mut self, opid: OpId, valid: bool) -> Result<(), Self::Error>;
 }
 
 pub trait ContractStateRead: ContractStateAccess {

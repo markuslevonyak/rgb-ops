@@ -185,10 +185,7 @@ impl<State: KnownState> OutputAssignment<State> {
         }
     }
 
-    pub fn check_bundle(&self, invalid_bundles: &BTreeSet<BundleId>) -> bool {
-        match self.bundle_id {
-            Some(bundle_id) => !invalid_bundles.contains(&bundle_id),
-            None => true,
-        }
+    pub fn check_op(&self, invalid_ops: &BTreeSet<OpId>) -> bool {
+        !invalid_ops.contains(&self.opout.op)
     }
 }
