@@ -39,7 +39,6 @@ pub enum RgbTransport {
     RestHttp { tls: bool, host: String },
     WebSockets { tls: bool, host: String },
     Storm {/* todo */},
-    UnspecifiedMeans,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Display, Error, From)]

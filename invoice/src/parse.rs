@@ -133,7 +133,7 @@ impl RgbInvoice {
     fn has_params(&self) -> bool {
         self.expiry.is_some()
             || self.assignment_name.is_some()
-            || self.transports != vec![RgbTransport::UnspecifiedMeans]
+            || !self.transports.is_empty()
             || !self.unknown_query.is_empty()
     }
 
@@ -145,7 +145,7 @@ impl RgbInvoice {
         if let Some(expiry) = self.expiry {
             query_params.insert(EXPIRY.to_string(), expiry.to_string());
         }
-        if self.transports != vec![RgbTransport::UnspecifiedMeans] {
+        if !self.transports.is_empty() {
             let mut transports: Vec<String> = vec![];
             for transport in self.transports.clone() {
                 transports.push(transport.to_string());
@@ -175,7 +175,6 @@ impl Display for RgbTransport {
             RgbTransport::Storm {} => {
                 write!(f, "storm{TRANSPORT_HOST_SEP}_/")?;
             }
-            RgbTransport::UnspecifiedMeans => {}
         };
         Ok(())
     }
@@ -505,7 +504,7 @@ impl FromStr for RgbInvoice {
             }
             transport_vec
         } else {
-            vec![RgbTransport::UnspecifiedMeans]
+            vec![]
         };
 
         let mut assignment_name = None;
