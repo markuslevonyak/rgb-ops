@@ -48,8 +48,8 @@ use super::{
     StateInconsistency, StateProvider, StateReadProvider, StateWriteProvider, StoreTransaction,
 };
 use crate::containers::{
-    Consignment, ContainerVer, Contract, Fascia, Kit, SealWitness, SecretSeals, Transfer,
-    ValidConsignment, ValidContract, ValidKit, ValidTransfer, WitnessBundle,
+    Consignment, ConsignmentExt, ContainerVer, Contract, Fascia, Kit, SealWitness, SecretSeals,
+    Transfer, ValidConsignment, ValidContract, ValidKit, ValidTransfer, WitnessBundle,
 };
 use crate::contract::{
     AllocatedState, BuilderError, ContractBuilder, ContractData, IssuerWrapper, LinkError,
@@ -1117,12 +1117,48 @@ impl<S: StashProvider, H: StateProvider, P: IndexProvider> Stock<S, H, P> {
         resolver: R,
     ) -> Result<(), StockError<S, H, P>> {
         let consignment = self.stash.resolve_secrets(consignment.into_consignment())?;
+        let consignment_bundles: Vec<(BundleId, BTreeSet<OpId>)> = consignment
+            .bundled_witnesses()
+            .map(|wb| {
+                let bundle = wb.bundle();
+                (bundle.bundle_id(), bundle.known_transitions_opids())
+            })
+            .collect();
         self.store_transaction(move |stash, state, index| {
             state.update_from_consignment(&consignment, &resolver)?;
             index.index_consignment(&consignment)?;
             stash.consume_consignment(consignment)?;
             Ok(())
         })?;
+
+        // the consignment was validated, so its operations have valid
+        // witnesses and a fully valid ancestry: revalidate any of them that a
+        // reorg had previously set as invalid, together with their
+        // descendants
+        let mut invalid_ops = self.as_state_provider().invalid_ops();
+        if consignment_bundles
+            .iter()
+            .any(|(_, opids)| opids.iter().any(|opid| invalid_ops.contains(opid)))
+        {
+            self.state.begin_transaction()?;
+            let witnesses = self.as_state_provider().witnesses().release();
+            let mut maybe_became_valid_opids: BTreeSet<OpId> = consignment_bundles
+                .iter()
+                .flat_map(|(_, opids)| opids.iter().copied())
+                .collect();
+            for (bundle_id, opids) in &consignment_bundles {
+                for opid in opids {
+                    self.maybe_update_ops_as_valid(
+                        *opid,
+                        *bundle_id,
+                        &mut invalid_ops,
+                        &mut maybe_became_valid_opids,
+                        &witnesses,
+                    )?;
+                }
+            }
+            self.state.commit_transaction()?;
+        }
 
         Ok(())
     }
