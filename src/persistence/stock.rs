@@ -1627,4 +1627,108 @@ mod test {
             println!("{:?}", builder.transition_type())
         }
     }
+
+    /// The descendant guard in `maybe_update_ops_as_valid` makes sure that a
+    /// subtree reachable through multiple revalidated parents is walked only
+    /// once. With a chain of k diamonds (op splitting to two ops merging back
+    /// into one) the unguarded walk visits the tail of the chain O(2^k)
+    /// times: with k = 64 it never terminates, so a removed guard shows up
+    /// here as a watchdog timeout.
+    #[test]
+    fn maybe_update_ops_as_valid_diamond_chain() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        use amplify::confinement::{NonEmptyOrdMap, NonEmptyOrdSet, NonEmptyVec};
+        use rgb::bitcoin::hashes::Hash;
+        use rgb::{Inputs, TransitionBundle};
+        use strict_encoding::StrictDumb;
+
+        const DIAMONDS: usize = 64;
+
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let mut stock = Stock::in_memory();
+            let contract_id =
+                ContractId::from_baid64_str("rgb:qFuT6DN8-9AuO95M-7R8R8Mc-AZvs7zG-obum1Va-BRnweKk")
+                    .unwrap();
+            let witness_id = Txid::from_byte_array([0xCE; 32]);
+            let ty = AssignmentType::strict_dumb();
+
+            let make_op = |parents: &[OpId], nonce: u64| -> Transition {
+                let mut transition = Transition::strict_dumb();
+                if !parents.is_empty() {
+                    transition.inputs = Inputs::from(NonEmptyOrdSet::from_checked(
+                        parents.iter().map(|p| Opout::new(*p, ty, 0)).collect(),
+                    ));
+                }
+                transition.nonce = nonce;
+                transition
+            };
+
+            let mut all_opids = bset![];
+            let mut register = |stock: &mut Stock, transition: Transition| -> (OpId, BundleId) {
+                let opid = transition.id();
+                let input_map = NonEmptyOrdMap::from_checked(
+                    transition
+                        .inputs
+                        .iter()
+                        .map(|input| (*input, opid))
+                        .collect(),
+                );
+                let bundle = TransitionBundle {
+                    input_map,
+                    known_transitions: NonEmptyVec::with(KnownTransition::new(opid, transition)),
+                };
+                let bundle_id = bundle.bundle_id();
+                stock.stash.consume_bundle(bundle.clone()).unwrap();
+                stock
+                    .index
+                    .index_bundle(contract_id, &bundle, witness_id)
+                    .unwrap();
+                // everything starts as invalid
+                stock.state.update_op(opid, false).unwrap();
+                all_opids.insert(opid);
+                (opid, bundle_id)
+            };
+
+            // root op; its dumb input plays the role of genesis
+            let (root_opid, root_bundle_id) = register(&mut stock, make_op(&[], 0));
+            let mut prev = root_opid;
+            for _ in 0..DIAMONDS {
+                let (left, _) = register(&mut stock, make_op(&[prev], 1));
+                let (right, _) = register(&mut stock, make_op(&[prev], 2));
+                let (join, _) = register(&mut stock, make_op(&[left, right], 0));
+                prev = join;
+            }
+
+            // revalidate the whole graph starting from the root, as if all
+            // the witnesses became valid again
+            let mut invalid_ops = stock.as_state_provider().invalid_ops();
+            let mut maybe_became_valid_opids = all_opids;
+            let witnesses = bmap! { witness_id => WitnessOrd::Tentative };
+            let valid = stock
+                .maybe_update_ops_as_valid(
+                    root_opid,
+                    root_bundle_id,
+                    &mut invalid_ops,
+                    &mut maybe_became_valid_opids,
+                    &witnesses,
+                )
+                .unwrap();
+
+            assert!(valid);
+            assert!(stock.as_state_provider().invalid_ops().is_empty());
+            tx.send(()).unwrap();
+        });
+
+        match rx.recv_timeout(Duration::from_secs(60)) {
+            Ok(()) => handle.join().unwrap(),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("revalidation did not terminate: descendant guard not working")
+            }
+            // the worker thread panicked: propagate its panic
+            Err(mpsc::RecvTimeoutError::Disconnected) => handle.join().unwrap(),
+        }
+    }
 }
