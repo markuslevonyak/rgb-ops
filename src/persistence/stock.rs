@@ -19,7 +19,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{btree_map, BTreeMap, BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::error::Error;
 use std::fmt::Debug;
@@ -31,7 +31,7 @@ use rgb::bitcoin::{OutPoint as Outpoint, Txid};
 use rgb::dbc::{Anchor, Proof};
 use rgb::validation::{
     OpoutsDagData, OpoutsDagInfo, ResolveWitness, UnsafeHistoryMap, WitnessOrdProvider,
-    WitnessResolverError,
+    WitnessResolverError, WitnessStatus,
 };
 use rgb::vm::WitnessOrd;
 use rgb::{
@@ -49,7 +49,7 @@ use super::{
 };
 use crate::containers::{
     Consignment, ConsignmentExt, ContainerVer, Contract, Fascia, Kit, SealWitness, SecretSeals,
-    Transfer, ValidConsignment, ValidContract, ValidKit, ValidTransfer, WitnessBundle,
+    ToWitnessId, Transfer, ValidConsignment, ValidContract, ValidKit, ValidTransfer, WitnessBundle,
 };
 use crate::contract::{
     AllocatedState, BuilderError, ContractBuilder, ContractData, IssuerWrapper, LinkError,
@@ -339,6 +339,26 @@ stock_err_conv!(FasciaError, InputError);
 
 pub type StockErrorMem<E = Infallible> = StockError<MemStash, MemState, MemIndex, E>;
 pub type StockErrorAll<S = MemStash, H = MemState, P = MemIndex> = StockError<S, H, P, InputError>;
+
+/// Resolver serving a set of already-resolved witness statuses, falling back
+/// to the wrapped resolver for the other witnesses.
+struct PreresolvedWitnesses<R: ResolveWitness> {
+    statuses: BTreeMap<Txid, WitnessStatus>,
+    fallback: R,
+}
+
+impl<R: ResolveWitness> ResolveWitness for PreresolvedWitnesses<R> {
+    fn resolve_witness(&self, witness_id: Txid) -> Result<WitnessStatus, WitnessResolverError> {
+        match self.statuses.get(&witness_id) {
+            Some(status) => Ok(status.clone()),
+            None => self.fallback.resolve_witness(witness_id),
+        }
+    }
+
+    fn check_chain_net(&self, chain_net: ChainNet) -> Result<(), WitnessResolverError> {
+        self.fallback.check_chain_net(chain_net)
+    }
+}
 
 #[derive(Debug)]
 pub struct Stock<
@@ -1111,19 +1131,125 @@ impl<S: StashProvider, H: StateProvider, P: IndexProvider> Stock<S, H, P> {
         self.consume_consignment(contract, resolver)
     }
 
+    /// Consumes a validated consignment.
+    ///
+    /// The consignment witnesses are re-resolved before consuming, since
+    /// their ords may have changed after the validation, e.g. if a reorg
+    /// happened in the meantime. If that leaves a consignment bundle without
+    /// any valid witness, the consignment is NOT consumed and
+    /// [`StockError::AbsentValidWitness`] is returned; in that case, as a
+    /// side effect, the fresh ords of the already-known witnesses are stored
+    /// and the known operations of the bundles left without a valid witness
+    /// are set as invalid, together with all their descendants.
     fn consume_consignment<R: ResolveWitness, const TRANSFER: bool>(
         &mut self,
         consignment: ValidConsignment<TRANSFER>,
         resolver: R,
     ) -> Result<(), StockError<S, H, P>> {
         let consignment = self.stash.resolve_secrets(consignment.into_consignment())?;
-        let consignment_bundles: Vec<(BundleId, BTreeSet<OpId>)> = consignment
+        let consignment_bundles: Vec<(Txid, BundleId, BTreeSet<OpId>)> = consignment
             .bundled_witnesses()
             .map(|wb| {
                 let bundle = wb.bundle();
-                (bundle.bundle_id(), bundle.known_transitions_opids())
+                (
+                    wb.pub_witness.to_witness_id(),
+                    bundle.bundle_id(),
+                    bundle.known_transitions_opids(),
+                )
             })
             .collect();
+
+        // resolve the consignment witnesses with accept-time resolutions,
+        // which may differ from the ones seen at validation time if a reorg
+        // happened in the meantime
+        let mut statuses: BTreeMap<Txid, WitnessStatus> = bmap![];
+        for (witness_id, _, _) in &consignment_bundles {
+            if !statuses.contains_key(witness_id) {
+                let status = resolver
+                    .resolve_witness(*witness_id)
+                    .map_err(|e| StockError::WitnessUnresolved(*witness_id, e))?;
+                statuses.insert(*witness_id, status);
+            }
+        }
+
+        // witness ords as they will be once the consignment is consumed:
+        // the stored ones overlaid with the fresh resolutions
+        let mut witnesses = self.as_state_provider().witnesses().release();
+        let known_witness_ids: BTreeSet<Txid> = witnesses.keys().copied().collect();
+        for (witness_id, status) in &statuses {
+            witnesses.insert(*witness_id, status.witness_ord());
+        }
+
+        // collect the bundles left without any valid witness, re-resolving
+        // the alternative witnesses known for a bundle before giving up on it
+        let mut bundles_without_witness: Vec<BundleId> = vec![];
+        for (witness_id, bundle_id, _) in &consignment_bundles {
+            if witnesses.get(witness_id).is_some_and(|ord| ord.is_valid()) {
+                continue;
+            }
+            let alt_witness_ids: BTreeSet<Txid> = match self.index.bundle_info(*bundle_id) {
+                Ok((witness_ids, _)) => witness_ids.collect(),
+                // the bundle is not known yet, so it has no other witnesses
+                Err(IndexError::Inconsistency(IndexInconsistency::BundleWitnessUnknown(_))) => {
+                    bset![]
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let mut has_valid_witness = false;
+            for alt_witness_id in alt_witness_ids {
+                if let btree_map::Entry::Vacant(e) = statuses.entry(alt_witness_id) {
+                    let status = resolver
+                        .resolve_witness(alt_witness_id)
+                        .map_err(|e| StockError::WitnessUnresolved(alt_witness_id, e))?;
+                    witnesses.insert(alt_witness_id, status.witness_ord());
+                    e.insert(status);
+                }
+                if witnesses
+                    .get(&alt_witness_id)
+                    .is_some_and(|ord| ord.is_valid())
+                {
+                    has_valid_witness = true;
+                    break;
+                }
+            }
+            if !has_valid_witness {
+                bundles_without_witness.push(*bundle_id);
+            }
+        }
+
+        // the consignment is stale: store the chain knowledge acquired while
+        // checking it, then refuse it
+        if !bundles_without_witness.is_empty() {
+            let mut ops_to_invalidate = vec![];
+            for bundle_id in &bundles_without_witness {
+                if let Ok(bundle) = self.stash.bundle(*bundle_id) {
+                    ops_to_invalidate.extend(bundle.known_transitions_opids());
+                }
+            }
+            self.state.begin_transaction()?;
+            // store the fresh ords of the already-known witnesses
+            for (witness_id, status) in &statuses {
+                if known_witness_ids.contains(witness_id) {
+                    self.state
+                        .upsert_witness(*witness_id, status.witness_ord())?;
+                }
+            }
+            // set the known operations of the bundles left without a valid
+            // witness as invalid, together with all their descendants
+            let mut visited = bset!();
+            for opid in ops_to_invalidate {
+                self.set_ops_as_invalid(opid, &mut visited)?;
+            }
+            self.state.commit_transaction()?;
+            return Err(StockError::AbsentValidWitness);
+        }
+
+        // serve the accept-time resolutions to the consignment consumption,
+        // so the stored ords cannot diverge from the ones checked above
+        let resolver = PreresolvedWitnesses {
+            statuses,
+            fallback: resolver,
+        };
         self.store_transaction(move |stash, state, index| {
             state.update_from_consignment(&consignment, &resolver)?;
             index.index_consignment(&consignment)?;
@@ -1131,22 +1257,21 @@ impl<S: StashProvider, H: StateProvider, P: IndexProvider> Stock<S, H, P> {
             Ok(())
         })?;
 
-        // the consignment was validated, so its operations have valid
-        // witnesses and a fully valid ancestry: revalidate any of them that a
-        // reorg had previously set as invalid, together with their
-        // descendants
+        // the consignment was validated and all its bundles have a valid
+        // witness: revalidate any of its operations that a reorg had
+        // previously set as invalid, together with their descendants
         let mut invalid_ops = self.as_state_provider().invalid_ops();
         if consignment_bundles
             .iter()
-            .any(|(_, opids)| opids.iter().any(|opid| invalid_ops.contains(opid)))
+            .any(|(_, _, opids)| opids.iter().any(|opid| invalid_ops.contains(opid)))
         {
             self.state.begin_transaction()?;
             let witnesses = self.as_state_provider().witnesses().release();
             let mut maybe_became_valid_opids: BTreeSet<OpId> = consignment_bundles
                 .iter()
-                .flat_map(|(_, opids)| opids.iter().copied())
+                .flat_map(|(_, _, opids)| opids.iter().copied())
                 .collect();
-            for (bundle_id, opids) in &consignment_bundles {
+            for (_, bundle_id, opids) in &consignment_bundles {
                 for opid in opids {
                     self.maybe_update_ops_as_valid(
                         *opid,
