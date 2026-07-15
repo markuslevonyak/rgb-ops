@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "rgb-invoicing"
-version = "0.11.1-rc.10"
+version = "0.11.1-rc.11"
 dependencies = [
  "amplify",
  "baid64",
@@ -1045,7 +1045,7 @@ dependencies = [
 
 [[package]]
 name = "rgb-ops"
-version = "0.11.1-rc.10"
+version = "0.11.1-rc.11"
 dependencies = [
  "amplify",
  "baid64",
