@@ -119,11 +119,13 @@ pub struct Kit {
     /// Version.
     pub version: ContainerVer,
 
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     pub schemata: TinyOrdSet<Schema>,
 
     /// Type system covering all types used in schema.
     pub types: TypeSystem,
 
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     /// Collection of scripts used across kit data.
     pub scripts: SmallOrdSet<Lib>,
 }

@@ -33,6 +33,7 @@ use super::LIB_NAME_RGB_CONTRACT;
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize), serde(crate = "serde_crate"))]
 pub struct ProofOfReserves {
     pub utxo: Outpoint,
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     pub proof: SmallBlob,
 }
 impl StrictSerialize for ProofOfReserves {}

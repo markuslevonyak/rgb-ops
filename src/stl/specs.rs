@@ -50,6 +50,7 @@ use super::{MediaType, ProofOfReserves, LIB_NAME_RGB_CONTRACT};
     serde(crate = "serde_crate", rename_all = "camelCase")
 )]
 pub struct BurnMeta {
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     pub burn_proofs: SmallOrdSet<ProofOfReserves>,
 }
 impl StrictSerialize for BurnMeta {}
@@ -64,6 +65,7 @@ impl StrictDeserialize for BurnMeta {}
     serde(crate = "serde_crate", rename_all = "camelCase")
 )]
 pub struct IssueMeta {
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     pub reserves: SmallOrdSet<ProofOfReserves>,
 }
 impl StrictSerialize for IssueMeta {}
@@ -141,7 +143,10 @@ impl Name {
     derive(Serialize, Deserialize),
     serde(crate = "serde_crate", transparent)
 )]
-pub struct Details(NonEmptyString<U8>);
+pub struct Details(
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
+    NonEmptyString<U8>,
+);
 impl StrictSerialize for Details {}
 impl StrictDeserialize for Details {}
 
@@ -339,7 +344,10 @@ impl ContractSpec {
     derive(Serialize, Deserialize),
     serde(crate = "serde_crate", transparent)
 )]
-pub struct RicardianContract(SmallString);
+pub struct RicardianContract(
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
+    SmallString,
+);
 impl DefaultBasedStrictDumb for RicardianContract {}
 impl StrictSerialize for RicardianContract {}
 impl StrictDeserialize for RicardianContract {}
@@ -370,6 +378,7 @@ pub struct Attachment {
     #[strict_type(rename = "type")]
     #[cfg_attr(feature = "serde", serde(rename = "type"))]
     pub ty: MediaType,
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::byte_array"))]
     pub digest: Bytes32,
 }
 impl StrictSerialize for Attachment {}
@@ -426,6 +435,7 @@ pub struct EmbeddedMedia {
     #[strict_type(rename = "type")]
     #[cfg_attr(feature = "serde", serde(rename = "type"))]
     pub ty: MediaType,
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     pub data: SmallBlob,
 }
 
@@ -471,7 +481,10 @@ impl AttachmentType {
     derive(Serialize, Deserialize),
     serde(crate = "serde_crate", transparent)
 )]
-pub struct AttachmentName(Confined<AsciiString, 1, 20>);
+pub struct AttachmentName(
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined_ascii"))]
+    Confined<AsciiString, 1, 20>,
+);
 impl StrictEncode for AttachmentName {
     fn strict_encode<W: TypedWrite>(&self, writer: W) -> std::io::Result<W> {
         let iter = self
@@ -532,6 +545,7 @@ pub struct TokenData {
     pub details: Option<Details>,
     pub preview: Option<EmbeddedMedia>,
     pub media: Option<Attachment>,
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     pub attachments: Confined<BTreeMap<u8, Attachment>, 0, 20>,
     pub reserves: Option<ProofOfReserves>,
 }

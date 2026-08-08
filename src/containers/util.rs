@@ -57,7 +57,10 @@ impl DefaultBasedStrictDumb for ContainerVer {}
     derive(Serialize, Deserialize),
     serde(crate = "serde_crate", rename_all = "camelCase")
 )]
-pub struct SecretSeals(NonEmptyOrdSet<SecretSeal, U16>);
+pub struct SecretSeals(
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
+    NonEmptyOrdSet<SecretSeal, U16>,
+);
 
 impl<'a> IntoIterator for &'a SecretSeals {
     type Item = SecretSeal;

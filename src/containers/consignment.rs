@@ -245,12 +245,14 @@ pub struct Consignment<const TRANSFER: bool> {
     /// contract.
     pub transfer: bool,
 
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     /// Set of secret seals which are history terminals.
     pub terminals: SmallOrdMap<BundleId, SecretSeals>,
 
     /// Genesis data.
     pub genesis: Genesis,
 
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     /// All bundled state transitions contained in the consignment, together
     /// with their witness data.
     pub bundles: LargeVec<WitnessBundle>,
@@ -261,6 +263,7 @@ pub struct Consignment<const TRANSFER: bool> {
     /// Type system covering all types used in schema.
     pub types: TypeSystem,
 
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     /// Collection of scripts used across consignment.
     pub scripts: Confined<BTreeSet<Lib>, 0, CONSIGNMENT_MAX_LIBS>,
 }
@@ -567,11 +570,14 @@ impl<const TRANSFER: bool> TryFrom<UncheckedConsignment<TRANSFER>> for Consignme
 struct ConsignmentShadow {
     version: ContainerVer,
     transfer: bool,
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     terminals: SmallOrdMap<BundleId, SecretSeals>,
     genesis: Genesis,
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     bundles: LargeVec<WitnessBundle>,
     schema: Schema,
     types: TypeSystem,
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     scripts: Confined<BTreeSet<Lib>, 0, CONSIGNMENT_MAX_LIBS>,
 }
 

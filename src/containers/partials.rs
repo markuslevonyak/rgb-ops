@@ -42,6 +42,7 @@ use crate::LIB_NAME_RGB_OPS;
 )]
 pub struct Batch {
     pub main: Transition,
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     pub extras: Confined<Vec<Transition>, 0, { U24 - 1 }>,
 }
 
@@ -81,6 +82,7 @@ impl Batch {
 )]
 pub struct Fascia {
     seal_witness: SealWitness,
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     bundles: NonEmptyOrdMap<ContractId, TransitionBundle, U24>,
 }
 

@@ -467,7 +467,9 @@ impl StateWriteProvider for MemState {
 #[strict_type(lib = LIB_NAME_RGB_STORAGE)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize), serde(crate = "serde_crate"))]
 pub struct MemGlobalState {
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     known: LargeOrdMap<GlobalOut, RevealedData>,
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::small_int"))]
     limit: u24,
 }
 
@@ -502,10 +504,14 @@ pub struct MemContractState {
     schema_id: SchemaId,
     #[getter(as_copy)]
     contract_id: ContractId,
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     #[getter(skip)]
     global: TinyOrdMap<GlobalStateType, MemGlobalState>,
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     rights: LargeOrdSet<OutputAssignment<VoidState>>,
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     fungibles: LargeOrdSet<OutputAssignment<RevealedValue>>,
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     data: LargeOrdSet<OutputAssignment<RevealedData>>,
 }
 
@@ -900,8 +906,43 @@ impl From<confinement::Error> for IndexWriteError<confinement::Error> {
     serde(crate = "serde_crate", rename_all = "camelCase")
 )]
 pub struct ContractIndex {
+    #[cfg_attr(feature = "serde", serde(with = "strict_encoding::serde_helpers::confined"))]
     public_opouts: LargeOrdSet<Opout>,
+    #[cfg_attr(feature = "serde", serde(with = "outpoint_opouts_serde"))]
     outpoint_opouts: LargeOrdMap<OutputSeal, MediumOrdSet<Opout>>,
+}
+
+/// Serde support for the `outpoint_opouts` field, which nests a `Confined` collection inside
+/// another one and thus can't use the generic `strict_encoding::serde_helpers::confined` helper.
+#[cfg(feature = "serde")]
+mod outpoint_opouts_serde {
+    use std::collections::BTreeMap;
+
+    use serde_crate::de::Error;
+    use serde_crate::{Deserialize, Deserializer, Serializer};
+
+    use super::*;
+
+    type Map = LargeOrdMap<OutputSeal, MediumOrdSet<Opout>>;
+
+    pub fn serialize<S>(map: &Map, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        // using collect_map to avoid unnecessary memory allocation
+        serializer.collect_map(
+            map.iter()
+                .map(|(seal, opouts)| (seal, opouts.as_unconfined())),
+        )
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Map, D::Error>
+    where D: Deserializer<'de> {
+        let unconfined = BTreeMap::<OutputSeal, BTreeSet<Opout>>::deserialize(deserializer)?;
+        let mut map = BTreeMap::new();
+        for (seal, opouts) in unconfined {
+            map.insert(seal, MediumOrdSet::try_from(opouts).map_err(D::Error::custom)?);
+        }
+        Map::try_from(map).map_err(D::Error::custom)
+    }
 }
 
 impl DefaultBasedStrictDumb for ContractIndex {}
