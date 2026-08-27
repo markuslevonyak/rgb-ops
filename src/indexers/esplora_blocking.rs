@@ -49,18 +49,15 @@ impl ResolveWitness for EsploraClient {
     }
 
     fn resolve_witness(&self, txid: Txid) -> Result<WitnessStatus, WitnessResolverError> {
-        let Some(tx) = self
+        let Some(tx_info) = self
             .inner
-            .get_tx(&txid)
+            .get_tx_info(&txid)
             .map_err(|e| WitnessResolverError::ResolverIssue(Some(txid), e.to_string()))?
         else {
             return Ok(WitnessStatus::Unresolved);
         };
-        let status = self
-            .inner
-            .get_tx_status(&txid)
-            .map_err(|e| WitnessResolverError::ResolverIssue(Some(txid), e.to_string()))?;
-        let ord = match status.block_height.zip(status.block_time) {
+        let tx = tx_info.to_tx();
+        let ord = match tx_info.status.block_height.zip(tx_info.status.block_time) {
             Some((h, t)) => {
                 let height = NonZeroU32::new(h).ok_or(WitnessResolverError::InvalidResolverData)?;
                 WitnessOrd::Mined(
@@ -71,5 +68,147 @@ impl ResolveWitness for EsploraClient {
             None => WitnessOrd::Tentative,
         };
         Ok(WitnessStatus::Resolved(tx, ord))
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread::{self, JoinHandle};
+    use std::time::Duration;
+
+    use rgb::bitcoin::{absolute, transaction, Transaction};
+
+    use super::*;
+
+    const BLOCK_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    fn dumb_tx(version: i32) -> Transaction {
+        Transaction {
+            version: transaction::Version::non_standard(version),
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+        }
+    }
+
+    fn dumb_tx_info(txid: Txid, version: i32, status: &str) -> String {
+        format!(
+            r#"{{"txid":"{txid}","version":{version},"locktime":0,"vin":[],"vout":[],"size":10,"weight":40,"status":{status},"fee":0}}"#
+        )
+    }
+
+    fn mock_client(status: &str, body: String) -> (EsploraClient, JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock Esplora server");
+        let address = listener.local_addr().expect("read mock server address");
+        let status = status.to_owned();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept Esplora request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set mock server read timeout");
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut buffer = [0_u8; 1024];
+                let bytes_read = stream.read(&mut buffer).expect("read Esplora request");
+                assert!(bytes_read > 0, "Esplora request ended before its headers");
+                request.extend_from_slice(&buffer[..bytes_read]);
+            }
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: \
+                 {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .expect("write mock Esplora response");
+            String::from_utf8(request).expect("Esplora request is UTF-8")
+        });
+        let url = format!("http://{address}");
+        let client = EsploraClient {
+            inner: esplora_client::Builder::new(&url)
+                .timeout(5)
+                .build_blocking(),
+        };
+        (client, handle)
+    }
+
+    fn assert_combined_request(request: JoinHandle<String>, txid: Txid) {
+        let request = request.join().expect("join mock Esplora server");
+        assert!(request.starts_with(&format!("GET /tx/{txid} HTTP/1.1")));
+    }
+
+    #[test]
+    fn resolves_confirmed_witness_with_one_combined_request() {
+        let tx = dumb_tx(2);
+        let txid = tx.compute_txid();
+        let status = format!(
+            r#"{{"confirmed":true,"block_height":1,"block_hash":"{BLOCK_HASH}","block_time":1231006505}}"#
+        );
+        let (client, request) = mock_client("200 OK", dumb_tx_info(txid, 2, &status));
+
+        let resolved = client.resolve_witness(txid).expect("resolve witness");
+
+        let position = WitnessPos::bitcoin(NonZeroU32::new(1).unwrap(), 1231006505).unwrap();
+        assert_eq!(resolved, WitnessStatus::Resolved(tx, WitnessOrd::Mined(position)));
+        assert_combined_request(request, txid);
+    }
+
+    #[test]
+    fn resolves_unconfirmed_witness_with_one_combined_request() {
+        let tx = dumb_tx(2);
+        let txid = tx.compute_txid();
+        let status =
+            r#"{"confirmed":false,"block_height":null,"block_hash":null,"block_time":null}"#;
+        let (client, request) = mock_client("200 OK", dumb_tx_info(txid, 2, status));
+
+        let resolved = client.resolve_witness(txid).expect("resolve witness");
+
+        assert_eq!(resolved, WitnessStatus::Resolved(tx, WitnessOrd::Tentative));
+        assert_combined_request(request, txid);
+    }
+
+    #[test]
+    fn returns_unresolved_for_missing_witness() {
+        let txid = dumb_tx(2).compute_txid();
+        let (client, request) = mock_client("404 Not Found", String::new());
+
+        let resolved = client.resolve_witness(txid).expect("resolve witness");
+
+        assert_eq!(resolved, WitnessStatus::Unresolved);
+        assert_combined_request(request, txid);
+    }
+
+    #[test]
+    fn rejects_zero_confirmation_height() {
+        let tx = dumb_tx(2);
+        let txid = tx.compute_txid();
+        let status = format!(
+            r#"{{"confirmed":true,"block_height":0,"block_hash":"{BLOCK_HASH}","block_time":1231006505}}"#
+        );
+        let (client, request) = mock_client("200 OK", dumb_tx_info(txid, 2, &status));
+
+        let error = client
+            .resolve_witness(txid)
+            .expect_err("reject invalid height");
+
+        assert_eq!(error, WitnessResolverError::InvalidResolverData);
+        assert_combined_request(request, txid);
+    }
+
+    #[test]
+    fn maps_malformed_response_to_resolver_error() {
+        let txid = dumb_tx(2).compute_txid();
+        let (client, request) = mock_client("200 OK", "not-json".to_owned());
+
+        let error = client
+            .resolve_witness(txid)
+            .expect_err("reject malformed response");
+
+        assert!(matches!(
+            error,
+            WitnessResolverError::ResolverIssue(Some(error_txid), _) if error_txid == txid
+        ));
+        assert_combined_request(request, txid);
     }
 }
