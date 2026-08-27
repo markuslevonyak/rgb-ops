@@ -288,45 +288,44 @@ pub enum InputError {
 }
 
 macro_rules! stock_err_conv {
+    (Infallible, $err2:ty) => {
+        impl<S: StashProvider, H: StateProvider, P: IndexProvider>
+            From<StockError<S, H, P, Infallible>> for StockError<S, H, P, $err2>
+        {
+            fn from(err: StockError<S, H, P, Infallible>) -> Self {
+                stock_err_conv!(@body err, e, match e {})
+            }
+        }
+    };
     ($err1:ty, $err2:ty) => {
         impl<S: StashProvider, H: StateProvider, P: IndexProvider> From<StockError<S, H, P, $err1>>
             for StockError<S, H, P, $err2>
         {
             fn from(err: StockError<S, H, P, $err1>) -> Self {
-                match err {
-                    StockError::InvalidInput(e) => StockError::InvalidInput(e.into()),
-                    StockError::Resolver(e) => StockError::Resolver(e),
-                    StockError::StashRead(e) => StockError::StashRead(e),
-                    StockError::StashWrite(e) => StockError::StashWrite(e),
-                    StockError::IndexRead(e) => StockError::IndexRead(e),
-                    StockError::IndexWrite(e) => StockError::IndexWrite(e),
-                    StockError::StateRead(e) => StockError::StateRead(e),
-                    StockError::StateWrite(e) => StockError::StateWrite(e),
-                    StockError::AbsentValidWitness => StockError::AbsentValidWitness,
-                    StockError::BundlesInconsistency => StockError::BundlesInconsistency,
-                    StockError::StashData(e) => StockError::StashData(e),
-                    StockError::StashInconsistency(e) => StockError::StashInconsistency(e),
-                    StockError::StateInconsistency(e) => StockError::StateInconsistency(e),
-                    StockError::IndexInconsistency(e) => StockError::IndexInconsistency(e),
-                    StockError::WitnessUnresolved(id, e) => StockError::WitnessUnresolved(id, e),
-                    StockError::ContractLinkError(e) => StockError::ContractLinkError(e),
-                }
+                stock_err_conv!(@body err, e, StockError::InvalidInput(e.into()))
             }
         }
     };
-}
-
-impl From<Infallible> for InputError {
-    fn from(_: Infallible) -> Self { unreachable!() }
-}
-impl From<Infallible> for ComposeError {
-    fn from(_: Infallible) -> Self { unreachable!() }
-}
-impl From<Infallible> for ConsignError {
-    fn from(_: Infallible) -> Self { unreachable!() }
-}
-impl From<Infallible> for FasciaError {
-    fn from(_: Infallible) -> Self { unreachable!() }
+    (@body $err:expr, $e:ident, $($invalid:tt)*) => {
+        match $err {
+            StockError::InvalidInput($e) => $($invalid)*,
+            StockError::Resolver(e) => StockError::Resolver(e),
+            StockError::StashRead(e) => StockError::StashRead(e),
+            StockError::StashWrite(e) => StockError::StashWrite(e),
+            StockError::IndexRead(e) => StockError::IndexRead(e),
+            StockError::IndexWrite(e) => StockError::IndexWrite(e),
+            StockError::StateRead(e) => StockError::StateRead(e),
+            StockError::StateWrite(e) => StockError::StateWrite(e),
+            StockError::AbsentValidWitness => StockError::AbsentValidWitness,
+            StockError::BundlesInconsistency => StockError::BundlesInconsistency,
+            StockError::StashData(e) => StockError::StashData(e),
+            StockError::StashInconsistency(e) => StockError::StashInconsistency(e),
+            StockError::StateInconsistency(e) => StockError::StateInconsistency(e),
+            StockError::IndexInconsistency(e) => StockError::IndexInconsistency(e),
+            StockError::WitnessUnresolved(id, e) => StockError::WitnessUnresolved(id, e),
+            StockError::ContractLinkError(e) => StockError::ContractLinkError(e),
+        }
+    };
 }
 
 stock_err_conv!(Infallible, ComposeError);
